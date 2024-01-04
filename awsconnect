@@ -1,0 +1,289 @@
+package com.example.myapplication
+
+
+import android.os.Bundle
+import android.util.Log
+import android.widget.Toast
+import androidx.appcompat.app.AppCompatActivity
+import org.bouncycastle.jce.provider.BouncyCastleProvider
+import org.bouncycastle.jce.provider.PEMUtil
+import org.bouncycastle.openssl.PEMKeyPair
+import org.bouncycastle.openssl.PEMParser
+import org.bouncycastle.openssl.jcajce.JcaPEMKeyConverter
+import org.bouncycastle.util.io.pem.PemReader
+import org.eclipse.paho.android.service.MqttAndroidClient
+import org.eclipse.paho.client.mqttv3.IMqttActionListener
+import org.eclipse.paho.client.mqttv3.IMqttDeliveryToken
+import org.eclipse.paho.client.mqttv3.IMqttToken
+import org.eclipse.paho.client.mqttv3.MqttCallback
+import org.eclipse.paho.client.mqttv3.MqttConnectOptions
+import org.eclipse.paho.client.mqttv3.MqttDeliveryToken
+import org.eclipse.paho.client.mqttv3.MqttMessage
+import java.io.ByteArrayInputStream
+import java.io.InputStream
+import java.io.InputStreamReader
+import java.security.KeyFactory
+import java.security.KeyStore
+import java.security.PrivateKey
+import java.security.Security
+import java.security.cert.CertificateFactory
+import java.security.spec.PKCS8EncodedKeySpec
+import javax.net.ssl.KeyManagerFactory
+import javax.net.ssl.SSLContext
+import javax.net.ssl.SSLSocketFactory
+import javax.net.ssl.TrustManagerFactory
+import java.io.BufferedReader
+import java.net.InetAddress
+import java.net.Socket
+import java.security.KeyPair
+import java.security.cert.X509Certificate
+import java.security.spec.X509EncodedKeySpec
+import java.util.Properties
+import javax.net.SocketFactory
+import javax.net.ssl.HostnameVerifier
+import javax.net.ssl.SSLParameters
+import javax.net.ssl.SSLSocket
+import javax.net.ssl.X509TrustManager
+
+
+class MainActivity : AppCompatActivity() {
+
+    private val clientId = "awsapp"
+    private val serverUri = "ssl://a196oqf103n66a-ats.iot.ap-south-1.amazonaws.com:8883"
+    private val topic = "XBee3/Data"
+
+    private lateinit var mqttAndroidClient: MqttAndroidClient
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        setContentView(R.layout.activity_main)
+        Security.addProvider(BouncyCastleProvider())
+        System.setProperty("software.amazon.awssdk.http.service.impl", "software.amazon.awssdk.http.urlconnection.UrlConnectionSdkHttpService")
+
+        connectToAWSIoT()
+    }
+
+    private fun showToast(message: String) {
+        runOnUiThread {
+            Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun connectToAWSIoT() {
+        try {
+            val serverURI = serverUri
+
+            // Replace these placeholders with your actual values
+            val thingArn = "arn:aws:iot:ap-south-1:031616314085:thing/awsapp"
+            val certInputStream: InputStream = resources.openRawResource(R.raw.cert)
+            val privateKeyInputStream: InputStream = resources.openRawResource(R.raw.private_key)
+            val rootCAInputStream: InputStream = resources.openRawResource(R.raw.rootca)
+
+            val sslSocketFactory = createSSLSocketFactory(certInputStream, privateKeyInputStream, rootCAInputStream)
+
+            mqttAndroidClient = MqttAndroidClient(applicationContext, serverURI, clientId)
+            mqttAndroidClient.setCallback(object : MqttCallback {
+                override fun connectionLost(cause: Throwable?) {
+                    Log.e("AWSIoT", "Connection to AWS IoT Core lost. Cause: ${cause?.message}")
+                    cause?.printStackTrace()
+                    showToast("Connection to AWS IoT Core lost. Cause: ${cause?.message}")
+                }
+
+
+
+                override fun messageArrived(topic: String?, message: MqttMessage?) {
+                    // Handle incoming messages
+                }
+
+                override fun deliveryComplete(token: IMqttDeliveryToken?) {
+                    // Handle message delivery completion
+                }
+            })
+
+            Log.e("AWSIoT", "Server URI: $serverURI")
+
+            val mqttConnectOptions = MqttConnectOptions()
+            mqttConnectOptions.isAutomaticReconnect = true
+            mqttConnectOptions.isCleanSession = false
+            mqttConnectOptions.connectionTimeout = 60 // in seconds
+            mqttConnectOptions.keepAliveInterval = 60 // in seconds
+            mqttConnectOptions.socketFactory = sslSocketFactory
+            mqttConnectOptions.userName = thingArn
+
+
+            mqttAndroidClient.connect(mqttConnectOptions, null, object : IMqttActionListener {
+                override fun onSuccess(asyncActionToken: IMqttToken?) {
+                    Log.e("AWSIoT", "Successfully connected to AWS IoT Core")
+                    subscribeToTopic()
+                    publishMessage("Hello, IoT!")
+                    showToast("Connected to AWS IoT Core")
+                }
+
+                override fun onFailure(asyncActionToken: IMqttToken?, exception: Throwable?) {
+                    Log.e("AWSIoT", "Failed to connect to AWS IoT Core", exception)
+                    showToast("${exception?.message}")
+                    exception?.printStackTrace()
+                }
+            })
+        } catch (e: Exception) {
+            Log.e("AWSIoT", "Exception during connection", e)
+            showToast("Exception during connection: ${e.message}")
+            e.printStackTrace()
+        }
+    }
+
+    private fun createSSLSocketFactory(
+        certInputStream: InputStream,
+        privateKeyInputStream: InputStream,
+        rootCAInputStream: InputStream
+    ): SSLSocketFactory {
+        try {
+            val certData = certInputStream.readBytes()
+            val privateKeyData = privateKeyInputStream.readBytes()
+            val rootCAData = rootCAInputStream.readBytes()
+
+            val keyPair = readKeyPair(privateKeyData)
+            val publicKey = readPublicKey(certData)
+
+            val keyStore = KeyStore.getInstance(KeyStore.getDefaultType())
+            keyStore.load(null, null)
+            keyStore.setKeyEntry(
+                "alias",
+                keyPair.private,
+                "".toCharArray(),
+                arrayOf<X509Certificate>(publicKey)
+            )
+
+            val keyManagerFactory = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm())
+            keyManagerFactory.init(keyStore, null)
+
+            val certificateFactory = CertificateFactory.getInstance("X.509")
+            val rootCAStream = ByteArrayInputStream(rootCAData)
+            val rootCACert = certificateFactory.generateCertificate(rootCAStream)
+            keyStore.setCertificateEntry("rootCA", rootCACert)
+
+            val trustManagerFactory = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm())
+            trustManagerFactory.init(keyStore)
+
+            val sslContext = SSLContext.getInstance("TLS")
+            sslContext.init(null, trustManagerFactory.trustManagers, null)
+
+            System.setProperty("javax.net.debug", "all")
+
+            return sslContext.socketFactory
+        } catch (e: Exception) {
+            Log.e("AWSIoT", "Failed to create SSL socket factory", e)
+            throw RuntimeException("Failed to create SSL socket factory", e)
+        }
+    }
+
+
+
+
+
+    private fun readKeyPair(privateKeyData: ByteArray): KeyPair {
+        try {
+            val pemReader = PemReader(InputStreamReader(ByteArrayInputStream(privateKeyData)))
+            val pemObject = pemReader.readPemObject()
+            pemReader.close()
+
+            val keyFactory = KeyFactory.getInstance("RSA")
+            val keySpec = PKCS8EncodedKeySpec(pemObject.content)
+
+            val privateKey = keyFactory.generatePrivate(keySpec)
+            return KeyPair(null, privateKey)
+        }
+        catch (e: Exception) {
+            Log.e("AWSIoT", "Failed to read key pair", e)
+            throw RuntimeException("Failed to read key pair", e)
+        }
+    }
+
+
+    private fun readPublicKey(certData: ByteArray): X509Certificate {
+        try {
+            val certificateFactory = CertificateFactory.getInstance("X.509")
+            val inputStream = ByteArrayInputStream(certData)
+            return certificateFactory.generateCertificate(inputStream) as X509Certificate
+
+        } catch (e: Exception) {
+        Log.e("AWSIoT", "Failed to read public key", e)
+        throw RuntimeException("Failed to read public key", e)
+    }
+    }
+
+
+
+
+
+
+    private fun getPrivateKey(privateKeyRawResourceId: Int): PrivateKey {
+        val inputStream = resources.openRawResource(privateKeyRawResourceId)
+        val reader = BufferedReader(InputStreamReader(inputStream))
+        val lines = StringBuilder()
+        var line: String?
+
+        try {
+            while (reader.readLine().also { line = it } != null) {
+                if (!line!!.startsWith("-----")) {
+                    lines.append(line).append('\n')
+                }
+            }
+        } catch (e: Exception) {
+            throw RuntimeException("Failed to read private key", e)
+        } finally {
+            try {
+                inputStream.close()
+            } catch (e: Exception) {
+                // Ignore
+            }
+        }
+
+        val privateKeyPEM = lines.toString()
+            .replace("-----BEGIN PRIVATE KEY-----", "")
+            .replace("-----END PRIVATE KEY-----", "")
+
+        val encoded = android.util.Base64.decode(privateKeyPEM, android.util.Base64.DEFAULT)
+
+        val keyFactory = KeyFactory.getInstance("RSA")
+        val keySpec = PKCS8EncodedKeySpec(encoded)
+
+        return keyFactory.generatePrivate(keySpec)
+    }
+
+
+
+    private fun subscribeToTopic() {
+        mqttAndroidClient.subscribe(topic, 1, null, object : IMqttActionListener {
+            override fun onSuccess(asyncActionToken: IMqttToken?) {
+                showToast("Subscribed to topic: $topic")
+            }
+
+            override fun onFailure(asyncActionToken: IMqttToken?, exception: Throwable?) {
+                Log.e("AWSIoT", "Failed to subscribe to topic: $topic", exception)
+                showToast("Failed to subscribe to topic: $topic")
+            }
+        })
+    }
+
+    private fun publishMessage(message: String) {
+        try {
+            val mqttMessage = MqttMessage()
+            mqttMessage.payload = message.toByteArray()
+
+            mqttAndroidClient.publish(topic, mqttMessage, null, object : IMqttActionListener {
+                override fun onSuccess(asyncActionToken: IMqttToken?) {
+                    showToast("Published message to topic: $topic")
+                }
+
+                override fun onFailure(asyncActionToken: IMqttToken?, exception: Throwable?) {
+                    showToast("Failed to publish message to topic: $topic")
+                }
+            })
+        } catch (e: Exception) {
+            Log.e("AWSIoT", "Failed to publish message", e)
+            showToast("Failed to publish message: ${e.message}")
+            e.printStackTrace()
+        }
+    }
+}
